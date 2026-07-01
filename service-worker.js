@@ -1,39 +1,38 @@
 'use strict';
 
-const TAB_STATE_PREFIX = 'intervenedTab:';
+const TAB_STATE_PREFIX = 'pauseStepTabState:';
+const ACTIVE_TAB_PREFIX = 'pauseStepActiveTab:';
+const REENTRY_DELAY_MS = 30 * 60 * 1000;
 
 chrome.runtime.onInstalled.addListener(async () => {
-  const {
-    taskUrl,
-    logs,
-    experimentCondition
-  } = await chrome.storage.local.get(['taskUrl', 'logs', 'experimentCondition']);
-  const defaults = {};
+  await ensureDefaults();
+  await initializeActiveTabs();
+});
 
-  if (typeof taskUrl !== 'string') {
-    defaults.taskUrl = '';
-  }
-
-  if (!Array.isArray(logs)) {
-    defaults.logs = [];
-  }
-
-  if (experimentCondition !== 'A' && experimentCondition !== 'B') {
-    defaults.experimentCondition = 'B';
-  }
-
-  if (Object.keys(defaults).length > 0) {
-    await chrome.storage.local.set(defaults);
-  }
+chrome.runtime.onStartup.addListener(async () => {
+  await ensureDefaults();
+  await initializeActiveTabs();
 });
 
 chrome.action.onClicked.addListener(() => {
   chrome.runtime.openOptionsPage();
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => {
-  chrome.storage.session.remove(`${TAB_STATE_PREFIX}${tabId}`).catch(() => {
-    // 一時状態の削除失敗は、行動記録には影響しない。
+chrome.tabs.onActivated.addListener((activeInfo) => {
+  handleTabActivated(activeInfo).catch((error) => {
+    console.error('[PauseStep] タブ切り替えの処理に失敗しました。', error);
+  });
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  handleTabUpdated(tabId, changeInfo, tab).catch((error) => {
+    console.error('[PauseStep] タブ更新の処理に失敗しました。', error);
+  });
+});
+
+chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
+  cleanupRemovedTab(tabId, removeInfo.windowId).catch(() => {
+    // 一時状態の削除失敗は行動ログには影響しない。
   });
 });
 
@@ -61,24 +60,206 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
+async function ensureDefaults() {
+  const {
+    taskUrl,
+    logs,
+    experimentCondition
+  } = await chrome.storage.local.get(['taskUrl', 'logs', 'experimentCondition']);
+  const defaults = {};
+
+  if (typeof taskUrl !== 'string') {
+    defaults.taskUrl = '';
+  }
+
+  if (!Array.isArray(logs)) {
+    defaults.logs = [];
+  }
+
+  if (experimentCondition !== 'A' && experimentCondition !== 'B') {
+    defaults.experimentCondition = 'B';
+  }
+
+  if (Object.keys(defaults).length > 0) {
+    await chrome.storage.local.set(defaults);
+  }
+}
+
+async function initializeActiveTabs() {
+  const activeTabs = await chrome.tabs.query({ active: true });
+  const values = {};
+
+  for (const tab of activeTabs) {
+    if (Number.isInteger(tab.id) && Number.isInteger(tab.windowId)) {
+      values[`${ACTIVE_TAB_PREFIX}${tab.windowId}`] = tab.id;
+    }
+  }
+
+  if (Object.keys(values).length > 0) {
+    await chrome.storage.session.set(values);
+  }
+}
+
 async function handleShouldIntervene(sender) {
-  const tabId = sender.tab?.id;
+  const tab = sender.tab;
+  const tabId = tab?.id;
+  const siteId = getSupportedSiteId(sender.url ?? tab?.url ?? '');
 
-  if (!Number.isInteger(tabId)) {
-    throw new Error('タブを特定できませんでした。');
+  if (!Number.isInteger(tabId) || !siteId) {
+    throw new Error('対象タブを特定できませんでした。');
   }
 
-  const key = `${TAB_STATE_PREFIX}${tabId}`;
-  const state = await chrome.storage.session.get(key);
-  const { experimentCondition = 'B' } = await chrome.storage.local.get('experimentCondition');
-  const condition = experimentCondition === 'A' ? 'A' : 'B';
+  const key = tabStateKey(tabId);
+  const stored = await chrome.storage.session.get(key);
+  const previousState = normalizeTabState(stored[key]);
+  const condition = await getExperimentCondition();
 
-  if (state[key] === true) {
-    return { ok: true, shouldIntervene: false, condition };
+  if (previousState.intervened && previousState.siteId === siteId) {
+    return {
+      ok: true,
+      shouldIntervene: false,
+      condition,
+      trigger: 'existing_session'
+    };
   }
 
-  await chrome.storage.session.set({ [key]: true });
-  return { ok: true, shouldIntervene: true, condition };
+  await chrome.storage.session.set({
+    [key]: {
+      intervened: true,
+      siteId,
+      lastInactiveAt: null,
+      reentryPending: false,
+      lastInterventionAt: Date.now()
+    }
+  });
+
+  if (tab.active && Number.isInteger(tab.windowId)) {
+    await chrome.storage.session.set({
+      [`${ACTIVE_TAB_PREFIX}${tab.windowId}`]: tabId
+    });
+  }
+
+  return {
+    ok: true,
+    shouldIntervene: true,
+    condition,
+    trigger: 'initial_open'
+  };
+}
+
+async function handleTabActivated({ tabId, windowId }) {
+  const activeKey = `${ACTIVE_TAB_PREFIX}${windowId}`;
+  const stored = await chrome.storage.session.get(activeKey);
+  const previousTabId = stored[activeKey];
+  const now = Date.now();
+
+  if (Number.isInteger(previousTabId) && previousTabId !== tabId) {
+    await markTabInactive(previousTabId, now);
+  }
+
+  await chrome.storage.session.set({ [activeKey]: tabId });
+  await maybeTriggerReturnIntervention(tabId, now);
+}
+
+async function handleTabUpdated(tabId, changeInfo, tab) {
+  if (typeof changeInfo.url === 'string' && !getSupportedSiteId(changeInfo.url)) {
+    await chrome.storage.session.remove(tabStateKey(tabId));
+    return;
+  }
+
+  if (changeInfo.status !== 'complete' || tab.active !== true) {
+    return;
+  }
+
+  const state = await getTabState(tabId);
+  if (state.reentryPending) {
+    await deliverReturnIntervention(tabId, state);
+  }
+}
+
+async function markTabInactive(tabId, timestamp) {
+  const key = tabStateKey(tabId);
+  const stored = await chrome.storage.session.get(key);
+  const state = normalizeTabState(stored[key]);
+
+  if (!state.intervened) {
+    return;
+  }
+
+  await chrome.storage.session.set({
+    [key]: {
+      ...state,
+      lastInactiveAt: timestamp,
+      reentryPending: false
+    }
+  });
+}
+
+async function maybeTriggerReturnIntervention(tabId, now) {
+  let tab;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch {
+    return;
+  }
+
+  const siteId = getSupportedSiteId(tab.url ?? '');
+  if (!siteId) {
+    return;
+  }
+
+  const state = await getTabState(tabId);
+  if (!state.intervened || state.siteId !== siteId) {
+    return;
+  }
+
+  if (typeof state.lastInactiveAt !== 'number') {
+    return;
+  }
+
+  if (now - state.lastInactiveAt < REENTRY_DELAY_MS) {
+    return;
+  }
+
+  const pendingState = {
+    ...state,
+    reentryPending: true
+  };
+  await setTabState(tabId, pendingState);
+  await deliverReturnIntervention(tabId, pendingState);
+}
+
+async function deliverReturnIntervention(tabId, state) {
+  const condition = await getExperimentCondition();
+
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, {
+      type: 'RESTART_INTERVENTION',
+      condition,
+      trigger: 'return_after_30m'
+    });
+
+    if (!response?.ok) {
+      throw new Error(response?.error ?? '再介入を開始できませんでした。');
+    }
+
+    await setTabState(tabId, {
+      ...state,
+      lastInactiveAt: null,
+      reentryPending: false,
+      lastInterventionAt: Date.now()
+    });
+  } catch (error) {
+    // 破棄されたタブなどでコンテンツスクリプトがまだ準備できていない場合は、
+    // onUpdated(status=complete)で再試行する。
+    if (!isMissingReceiverError(error)) {
+      await setTabState(tabId, {
+        ...state,
+        reentryPending: false
+      });
+      throw error;
+    }
+  }
 }
 
 async function handleMarkStudyPromptShown(message) {
@@ -159,6 +340,103 @@ async function handleCloseCurrentTab(sender) {
 
   await chrome.tabs.remove(tabId);
   return { ok: true };
+}
+
+async function cleanupRemovedTab(tabId, windowId) {
+  await chrome.storage.session.remove(tabStateKey(tabId));
+
+  if (!Number.isInteger(windowId)) {
+    return;
+  }
+
+  const activeKey = `${ACTIVE_TAB_PREFIX}${windowId}`;
+  const stored = await chrome.storage.session.get(activeKey);
+  if (stored[activeKey] === tabId) {
+    await chrome.storage.session.remove(activeKey);
+  }
+}
+
+async function getExperimentCondition() {
+  const { experimentCondition = 'B' } = await chrome.storage.local.get('experimentCondition');
+  return experimentCondition === 'A' ? 'A' : 'B';
+}
+
+async function getTabState(tabId) {
+  const key = tabStateKey(tabId);
+  const stored = await chrome.storage.session.get(key);
+  return normalizeTabState(stored[key]);
+}
+
+async function setTabState(tabId, state) {
+  await chrome.storage.session.set({
+    [tabStateKey(tabId)]: normalizeTabState(state)
+  });
+}
+
+function normalizeTabState(value) {
+  if (value === true) {
+    return {
+      intervened: true,
+      siteId: null,
+      lastInactiveAt: null,
+      reentryPending: false,
+      lastInterventionAt: null
+    };
+  }
+
+  if (!value || typeof value !== 'object') {
+    return {
+      intervened: false,
+      siteId: null,
+      lastInactiveAt: null,
+      reentryPending: false,
+      lastInterventionAt: null
+    };
+  }
+
+  return {
+    intervened: value.intervened === true,
+    siteId: typeof value.siteId === 'string' ? value.siteId : null,
+    lastInactiveAt: typeof value.lastInactiveAt === 'number' ? value.lastInactiveAt : null,
+    reentryPending: value.reentryPending === true,
+    lastInterventionAt: typeof value.lastInterventionAt === 'number' ? value.lastInterventionAt : null
+  };
+}
+
+function tabStateKey(tabId) {
+  return `${TAB_STATE_PREFIX}${tabId}`;
+}
+
+function getSupportedSiteId(rawUrl) {
+  if (typeof rawUrl !== 'string' || rawUrl === '') {
+    return null;
+  }
+
+  try {
+    const host = new URL(rawUrl).hostname.toLowerCase();
+
+    if (host === 'youtube.com' || host.endsWith('.youtube.com')) {
+      return 'youtube';
+    }
+
+    if (host === 'x.com' || host.endsWith('.x.com')) {
+      return 'x';
+    }
+
+    if (host === 'instagram.com' || host.endsWith('.instagram.com')) {
+      return 'instagram';
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function isMissingReceiverError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes('Receiving end does not exist') ||
+    message.includes('Could not establish connection');
 }
 
 async function updateLog(logId, updater) {

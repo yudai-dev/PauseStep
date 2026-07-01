@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "PauseStep",
-  "version": "0.4.0",
-  "description": "SNSを開く前にひと呼吸を促し、称賛のみの条件Aと学習導線付きの条件Bを切り替えて比較できます。",
+  "version": "0.5.0",
+  "description": "SNS利用前と、30分以上離れた後の再訪時にひと呼吸を促し、条件A/Bを比較できるChrome拡張機能です。",
   "permissions": [
     "storage",
     "tabs"

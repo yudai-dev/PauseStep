@@ -100,7 +100,9 @@
       </div>
       <p id="current-behavior" class="current-behavior"></p>
       <ul class="behavior-list">
-        <li>YouTube・X・Instagramを新しいタブで開いたときに介入します。</li>
+        <li>YouTube・X・Instagramを新しく開いたときに介入します。</li>
+        <li>同じSNSタブでも、30分以上ほかのタブを見た後に戻ると再介入します。</li>
+        <li>30分未満で戻った場合や、SNS内で動画・ページを移動しただけの場合は再介入しません。</li>
         <li>各記録には、その時点で使用していた条件A／Bを保存します。</li>
         <li>条件の切り替え後に開いたSNSから、新しい条件が適用されます。</li>
         <li>選択結果と課題URLは、このChromeの <code>chrome.storage.local</code> に保存します。</li>

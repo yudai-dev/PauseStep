@@ -10,6 +10,18 @@
   let pageLocked = false;
   let waitingTimer = null;
   let experimentCondition = 'B';
+  let interventionTrigger = 'initial_open';
+
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type !== 'RESTART_INTERVENTION') {
+      return false;
+    }
+
+    restartIntervention(message)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  });
 
   initialize().catch((error) => {
     console.error('[PauseStep] 初期化に失敗しました。', error);
@@ -21,22 +33,41 @@
       return;
     }
 
-    lockPage();
-
     const response = await chrome.runtime.sendMessage({ type: 'SHOULD_INTERVENE' });
     if (!response?.ok || !response.shouldIntervene) {
-      unlockPage();
       return;
     }
 
-    experimentCondition = response.condition === 'A' ? 'A' : 'B';
+    await beginIntervention(
+      response.condition,
+      response.trigger ?? 'initial_open'
+    );
+  }
 
+  async function restartIntervention(message) {
+    if (pageLocked || document.getElementById(OVERLAY_ID)) {
+      return { alreadyActive: true };
+    }
+
+    await beginIntervention(
+      message.condition,
+      message.trigger ?? 'return_after_30m'
+    );
+    return { alreadyActive: false };
+  }
+
+  async function beginIntervention(condition, trigger) {
     const site = detectSite(location.hostname);
     if (!site) {
-      unlockPage();
-      return;
+      throw new Error('対象サイトを特定できませんでした。');
     }
 
+    experimentCondition = condition === 'A' ? 'A' : 'B';
+    interventionTrigger = trigger === 'return_after_30m'
+      ? 'return_after_30m'
+      : 'initial_open';
+
+    lockPage();
     await waitForDocumentElement();
     attachOverlay(createOverlay());
     showWaitingStage(site);
@@ -277,6 +308,7 @@
       timestamp: new Date().toISOString(),
       site,
       condition: experimentCondition,
+      trigger: interventionTrigger,
       firstChoice,
       studyPromptShown: false,
       studyPromptShownAt: null,
