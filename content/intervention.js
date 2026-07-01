@@ -11,6 +11,7 @@
   let waitingTimer = null;
   let experimentCondition = 'B';
   let interventionTrigger = 'initial_open';
+  let pausedMedia = [];
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type !== 'RESTART_INTERVENTION') {
@@ -63,13 +64,16 @@
     }
 
     experimentCondition = condition === 'A' ? 'A' : 'B';
-    interventionTrigger = trigger === 'return_after_30m'
-      ? 'return_after_30m'
+    interventionTrigger = trigger === 'periodic_30m'
+      ? 'periodic_30m'
       : 'initial_open';
 
     lockPage();
     await waitForDocumentElement();
     attachOverlay(createOverlay());
+    if (site.id === 'youtube') {
+      pauseMediaForIntervention();
+    }
     showWaitingStage(site);
   }
 
@@ -78,11 +82,17 @@
     document.documentElement?.classList.add('study-start-locked');
   }
 
-  function unlockPage() {
+  function unlockPage({ resumeMedia = false } = {}) {
     pageLocked = false;
     clearWaitingTimer();
     document.documentElement?.classList.remove('study-start-locked');
     document.getElementById(OVERLAY_ID)?.remove();
+
+    if (resumeMedia) {
+      resumeMediaAfterIntervention();
+    } else {
+      pausedMedia = [];
+    }
   }
 
   function waitForDocumentElement() {
@@ -123,11 +133,17 @@
   }
 
   function showFirstChoiceStage(site) {
+    const isPeriodic = interventionTrigger === 'periodic_30m';
+    const question = isPeriodic
+      ? `${escapeHtml(site.label)}を続けますか？`
+      : `${escapeHtml(site.label)}を開きますか？`;
+    const continueLabel = isPeriodic ? '続ける' : '開く';
+
     renderStage(`
       <main class="study-start-card study-start-card--choice" role="dialog" aria-modal="true" aria-labelledby="study-start-title">
-        <h1 id="study-start-title" class="study-start-title">${escapeHtml(site.label)}を開きますか？</h1>
+        <h1 id="study-start-title" class="study-start-title">${question}</h1>
         <div class="study-start-actions">
-          <button id="study-start-open-site" class="study-start-button study-start-button--secondary" type="button">開く</button>
+          <button id="study-start-open-site" class="study-start-button study-start-button--secondary" type="button">${continueLabel}</button>
           <button id="study-start-dismiss-site" class="study-start-button study-start-button--primary" type="button">やめる</button>
         </div>
         <p id="study-start-status" class="study-start-status" role="status" aria-live="polite"></p>
@@ -138,7 +154,16 @@
       disableButtons();
       try {
         await createLog(site.id, 'open_site');
-        unlockPage();
+        const response = await chrome.runtime.sendMessage({
+          type: 'INTERVENTION_RESOLVED',
+          action: 'open_site',
+          site: site.id,
+          trigger: interventionTrigger
+        });
+        if (!response?.ok) {
+          throw new Error(response?.error ?? '次の30分計測を開始できませんでした。');
+        }
+        unlockPage({ resumeMedia: true });
       } catch (error) {
         showStatus(`記録に失敗しました: ${error.message}`);
         enableButtons();
@@ -250,6 +275,34 @@
         }
       }
     });
+  }
+
+  function pauseMediaForIntervention() {
+    pausedMedia = Array.from(document.querySelectorAll('video'))
+      .filter((media) => !media.paused && !media.ended);
+
+    for (const media of pausedMedia) {
+      try {
+        media.pause();
+      } catch (error) {
+        console.debug('[PauseStep] 動画を一時停止できませんでした。', error);
+      }
+    }
+  }
+
+  function resumeMediaAfterIntervention() {
+    const mediaToResume = pausedMedia;
+    pausedMedia = [];
+
+    for (const media of mediaToResume) {
+      if (!media.isConnected || media.ended) {
+        continue;
+      }
+
+      media.play().catch(() => {
+        // ブラウザの自動再生制限時は、利用者の操作に任せる。
+      });
+    }
   }
 
   function exitDismissedSite() {

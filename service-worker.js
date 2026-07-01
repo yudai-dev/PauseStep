@@ -2,7 +2,8 @@
 
 const TAB_STATE_PREFIX = 'pauseStepTabState:';
 const ACTIVE_TAB_PREFIX = 'pauseStepActiveTab:';
-const REENTRY_DELAY_MS = 30 * 60 * 1000;
+const YOUTUBE_ALARM_PREFIX = 'pauseStepYoutube30m:';
+const YOUTUBE_INTERVAL_MS = 30 * 60 * 1000;
 
 chrome.runtime.onInstalled.addListener(async () => {
   await ensureDefaults();
@@ -36,6 +37,12 @@ chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
   });
 });
 
+chrome.alarms.onAlarm.addListener((alarm) => {
+  handleYoutubeAlarm(alarm).catch((error) => {
+    console.error('[PauseStep] YouTubeの30分介入に失敗しました。', error);
+  });
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message.type !== 'string') {
     return false;
@@ -43,6 +50,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   const handlers = {
     SHOULD_INTERVENE: () => handleShouldIntervene(sender),
+    INTERVENTION_RESOLVED: () => handleInterventionResolved(message, sender),
     MARK_STUDY_PROMPT_SHOWN: () => handleMarkStudyPromptShown(message),
     OPEN_TASK_FROM_SUCCESS: () => handleOpenTaskFromSuccess(message, sender),
     EXIT_DISMISSED_SITE: () => handleExitDismissedSite(sender),
@@ -109,12 +117,19 @@ async function handleShouldIntervene(sender) {
     throw new Error('対象タブを特定できませんでした。');
   }
 
-  const key = tabStateKey(tabId);
-  const stored = await chrome.storage.session.get(key);
-  const previousState = normalizeTabState(stored[key]);
+  const state = await getTabState(tabId);
   const condition = await getExperimentCondition();
 
-  if (previousState.intervened && previousState.siteId === siteId) {
+  if (state.periodicInterventionActive && siteId === 'youtube') {
+    return {
+      ok: true,
+      shouldIntervene: true,
+      condition,
+      trigger: 'periodic_30m'
+    };
+  }
+
+  if (state.intervened && state.siteId === siteId) {
     return {
       ok: true,
       shouldIntervene: false,
@@ -123,14 +138,13 @@ async function handleShouldIntervene(sender) {
     };
   }
 
-  await chrome.storage.session.set({
-    [key]: {
-      intervened: true,
-      siteId,
-      lastInactiveAt: null,
-      reentryPending: false,
-      lastInterventionAt: Date.now()
-    }
+  await setTabState(tabId, {
+    intervened: true,
+    siteId,
+    youtubeAccumulatedMs: 0,
+    youtubeActiveSince: null,
+    periodicInterventionActive: false,
+    lastInterventionAt: Date.now()
   });
 
   if (tab.active && Number.isInteger(tab.windowId)) {
@@ -147,6 +161,42 @@ async function handleShouldIntervene(sender) {
   };
 }
 
+async function handleInterventionResolved(message, sender) {
+  const tab = sender.tab;
+  const tabId = tab?.id;
+  const siteId = getSupportedSiteId(sender.url ?? tab?.url ?? '');
+
+  if (!Number.isInteger(tabId) || !siteId) {
+    throw new Error('介入を終了したタブを特定できませんでした。');
+  }
+
+  if (message.action !== 'open_site') {
+    return { ok: true };
+  }
+
+  const state = await getTabState(tabId);
+  const nextState = {
+    ...state,
+    intervened: true,
+    siteId,
+    periodicInterventionActive: false,
+    lastInterventionAt: Date.now()
+  };
+
+  if (siteId === 'youtube') {
+    nextState.youtubeAccumulatedMs = 0;
+    nextState.youtubeActiveSince = tab.active ? Date.now() : null;
+    await clearYoutubeAlarm(tabId);
+
+    if (tab.active) {
+      await scheduleYoutubeAlarm(tabId, YOUTUBE_INTERVAL_MS);
+    }
+  }
+
+  await setTabState(tabId, nextState);
+  return { ok: true };
+}
+
 async function handleTabActivated({ tabId, windowId }) {
   const activeKey = `${ACTIVE_TAB_PREFIX}${windowId}`;
   const stored = await chrome.storage.session.get(activeKey);
@@ -154,17 +204,21 @@ async function handleTabActivated({ tabId, windowId }) {
   const now = Date.now();
 
   if (Number.isInteger(previousTabId) && previousTabId !== tabId) {
-    await markTabInactive(previousTabId, now);
+    await pauseYoutubeUsage(previousTabId, now);
   }
 
   await chrome.storage.session.set({ [activeKey]: tabId });
-  await maybeTriggerReturnIntervention(tabId, now);
+  await resumeYoutubeUsage(tabId, now);
 }
 
 async function handleTabUpdated(tabId, changeInfo, tab) {
-  if (typeof changeInfo.url === 'string' && !getSupportedSiteId(changeInfo.url)) {
-    await chrome.storage.session.remove(tabStateKey(tabId));
-    return;
+  if (typeof changeInfo.url === 'string') {
+    const siteId = getSupportedSiteId(changeInfo.url);
+    if (!siteId) {
+      await clearYoutubeAlarm(tabId);
+      await chrome.storage.session.remove(tabStateKey(tabId));
+      return;
+    }
   }
 
   if (changeInfo.status !== 'complete' || tab.active !== true) {
@@ -172,30 +226,34 @@ async function handleTabUpdated(tabId, changeInfo, tab) {
   }
 
   const state = await getTabState(tabId);
-  if (state.reentryPending) {
-    await deliverReturnIntervention(tabId, state);
+  if (state.siteId === 'youtube' && state.periodicInterventionActive) {
+    await deliverPeriodicIntervention(tabId, state);
   }
 }
 
-async function markTabInactive(tabId, timestamp) {
-  const key = tabStateKey(tabId);
-  const stored = await chrome.storage.session.get(key);
-  const state = normalizeTabState(stored[key]);
-
-  if (!state.intervened) {
+async function pauseYoutubeUsage(tabId, now) {
+  const state = await getTabState(tabId);
+  if (state.siteId !== 'youtube' || state.periodicInterventionActive) {
     return;
   }
 
-  await chrome.storage.session.set({
-    [key]: {
-      ...state,
-      lastInactiveAt: timestamp,
-      reentryPending: false
-    }
+  if (typeof state.youtubeActiveSince !== 'number') {
+    return;
+  }
+
+  const elapsed = Math.max(0, now - state.youtubeActiveSince);
+  await setTabState(tabId, {
+    ...state,
+    youtubeAccumulatedMs: Math.min(
+      YOUTUBE_INTERVAL_MS,
+      state.youtubeAccumulatedMs + elapsed
+    ),
+    youtubeActiveSince: null
   });
+  await clearYoutubeAlarm(tabId);
 }
 
-async function maybeTriggerReturnIntervention(tabId, now) {
+async function resumeYoutubeUsage(tabId, now) {
   let tab;
   try {
     tab = await chrome.tabs.get(tabId);
@@ -203,62 +261,90 @@ async function maybeTriggerReturnIntervention(tabId, now) {
     return;
   }
 
-  const siteId = getSupportedSiteId(tab.url ?? '');
-  if (!siteId) {
+  if (getSupportedSiteId(tab.url ?? '') !== 'youtube') {
     return;
   }
 
   const state = await getTabState(tabId);
-  if (!state.intervened || state.siteId !== siteId) {
+  if (!state.intervened || state.siteId !== 'youtube' || state.periodicInterventionActive) {
     return;
   }
 
-  if (typeof state.lastInactiveAt !== 'number') {
+  const remaining = Math.max(0, YOUTUBE_INTERVAL_MS - state.youtubeAccumulatedMs);
+  if (remaining === 0) {
+    await markAndDeliverPeriodicIntervention(tabId, state);
     return;
   }
 
-  if (now - state.lastInactiveAt < REENTRY_DELAY_MS) {
+  await setTabState(tabId, {
+    ...state,
+    youtubeActiveSince: now
+  });
+  await scheduleYoutubeAlarm(tabId, remaining);
+}
+
+async function handleYoutubeAlarm(alarm) {
+  const tabId = parseYoutubeAlarmTabId(alarm.name);
+  if (!Number.isInteger(tabId)) {
     return;
   }
+
+  let tab;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch {
+    await clearYoutubeAlarm(tabId);
+    return;
+  }
+
+  if (!tab.active || getSupportedSiteId(tab.url ?? '') !== 'youtube') {
+    await pauseYoutubeUsage(tabId, Date.now());
+    return;
+  }
+
+  const state = await getTabState(tabId);
+  if (state.siteId !== 'youtube' || state.periodicInterventionActive) {
+    return;
+  }
+
+  await markAndDeliverPeriodicIntervention(tabId, state);
+}
+
+async function markAndDeliverPeriodicIntervention(tabId, state) {
+  await clearYoutubeAlarm(tabId);
 
   const pendingState = {
     ...state,
-    reentryPending: true
+    youtubeAccumulatedMs: YOUTUBE_INTERVAL_MS,
+    youtubeActiveSince: null,
+    periodicInterventionActive: true
   };
   await setTabState(tabId, pendingState);
-  await deliverReturnIntervention(tabId, pendingState);
+  await deliverPeriodicIntervention(tabId, pendingState);
 }
 
-async function deliverReturnIntervention(tabId, state) {
+async function deliverPeriodicIntervention(tabId, state) {
   const condition = await getExperimentCondition();
 
   try {
     const response = await chrome.tabs.sendMessage(tabId, {
       type: 'RESTART_INTERVENTION',
       condition,
-      trigger: 'return_after_30m'
+      trigger: 'periodic_30m'
     });
 
     if (!response?.ok) {
-      throw new Error(response?.error ?? '再介入を開始できませんでした。');
+      throw new Error(response?.error ?? '30分後の介入を開始できませんでした。');
     }
-
-    await setTabState(tabId, {
-      ...state,
-      lastInactiveAt: null,
-      reentryPending: false,
-      lastInterventionAt: Date.now()
-    });
   } catch (error) {
-    // 破棄されたタブなどでコンテンツスクリプトがまだ準備できていない場合は、
-    // onUpdated(status=complete)で再試行する。
     if (!isMissingReceiverError(error)) {
       await setTabState(tabId, {
         ...state,
-        reentryPending: false
+        periodicInterventionActive: false
       });
       throw error;
     }
+    // ページ読み込み中はonUpdatedまたはSHOULD_INTERVENEで再開する。
   }
 }
 
@@ -296,6 +382,7 @@ async function handleOpenTaskFromSuccess(message, sender) {
     throw new Error('課題ページを開くタブを特定できませんでした。');
   }
 
+  await clearYoutubeAlarm(tabId);
   await chrome.tabs.create({
     url: normalizedUrl,
     active: true,
@@ -312,6 +399,8 @@ async function handleExitDismissedSite(sender) {
   if (!Number.isInteger(currentTab?.id) || !Number.isInteger(currentTab.windowId)) {
     throw new Error('終了するタブを特定できませんでした。');
   }
+
+  await clearYoutubeAlarm(currentTab.id);
 
   const tabsInWindow = await chrome.tabs.query({ windowId: currentTab.windowId });
   const fallbackTab = tabsInWindow.find((tab) => Number.isInteger(tab.id) && tab.id !== currentTab.id);
@@ -338,11 +427,13 @@ async function handleCloseCurrentTab(sender) {
     throw new Error('閉じるタブを特定できませんでした。');
   }
 
+  await clearYoutubeAlarm(tabId);
   await chrome.tabs.remove(tabId);
   return { ok: true };
 }
 
 async function cleanupRemovedTab(tabId, windowId) {
+  await clearYoutubeAlarm(tabId);
   await chrome.storage.session.remove(tabStateKey(tabId));
 
   if (!Number.isInteger(windowId)) {
@@ -354,6 +445,30 @@ async function cleanupRemovedTab(tabId, windowId) {
   if (stored[activeKey] === tabId) {
     await chrome.storage.session.remove(activeKey);
   }
+}
+
+async function scheduleYoutubeAlarm(tabId, delayMs) {
+  await chrome.alarms.clear(youtubeAlarmName(tabId));
+  chrome.alarms.create(youtubeAlarmName(tabId), {
+    when: Date.now() + Math.max(1000, delayMs)
+  });
+}
+
+async function clearYoutubeAlarm(tabId) {
+  await chrome.alarms.clear(youtubeAlarmName(tabId));
+}
+
+function youtubeAlarmName(tabId) {
+  return `${YOUTUBE_ALARM_PREFIX}${tabId}`;
+}
+
+function parseYoutubeAlarmTabId(name) {
+  if (typeof name !== 'string' || !name.startsWith(YOUTUBE_ALARM_PREFIX)) {
+    return null;
+  }
+
+  const value = Number(name.slice(YOUTUBE_ALARM_PREFIX.length));
+  return Number.isInteger(value) ? value : null;
 }
 
 async function getExperimentCondition() {
@@ -374,22 +489,13 @@ async function setTabState(tabId, state) {
 }
 
 function normalizeTabState(value) {
-  if (value === true) {
-    return {
-      intervened: true,
-      siteId: null,
-      lastInactiveAt: null,
-      reentryPending: false,
-      lastInterventionAt: null
-    };
-  }
-
   if (!value || typeof value !== 'object') {
     return {
       intervened: false,
       siteId: null,
-      lastInactiveAt: null,
-      reentryPending: false,
+      youtubeAccumulatedMs: 0,
+      youtubeActiveSince: null,
+      periodicInterventionActive: false,
       lastInterventionAt: null
     };
   }
@@ -397,9 +503,16 @@ function normalizeTabState(value) {
   return {
     intervened: value.intervened === true,
     siteId: typeof value.siteId === 'string' ? value.siteId : null,
-    lastInactiveAt: typeof value.lastInactiveAt === 'number' ? value.lastInactiveAt : null,
-    reentryPending: value.reentryPending === true,
-    lastInterventionAt: typeof value.lastInterventionAt === 'number' ? value.lastInterventionAt : null
+    youtubeAccumulatedMs: Number.isFinite(value.youtubeAccumulatedMs)
+      ? Math.max(0, value.youtubeAccumulatedMs)
+      : 0,
+    youtubeActiveSince: typeof value.youtubeActiveSince === 'number'
+      ? value.youtubeActiveSince
+      : null,
+    periodicInterventionActive: value.periodicInterventionActive === true,
+    lastInterventionAt: typeof value.lastInterventionAt === 'number'
+      ? value.lastInterventionAt
+      : null
   };
 }
 
