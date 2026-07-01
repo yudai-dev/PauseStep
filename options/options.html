@@ -3,27 +3,57 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>学習着手支援 - 設定と結果</title>
+  <title>PauseStep - 設定と結果</title>
   <link rel="stylesheet" href="options.css">
 </head>
 <body>
   <main class="page-shell">
     <header class="page-header">
       <p class="eyebrow">Chrome拡張機能</p>
-      <h1>学習着手支援</h1>
-      <p>SNSをやめられた成功と、任意で課題ページを開いた追加成果を端末内に記録します。</p>
+      <h1>PauseStep</h1>
+      <p>条件Aと条件Bを切り替え、SNS停止率と学習着手を比較できます。</p>
     </header>
+
+    <section class="panel" aria-labelledby="condition-heading">
+      <div class="panel-heading panel-heading--split">
+        <div>
+          <p class="section-number">01</p>
+          <h2 id="condition-heading">実験条件</h2>
+        </div>
+        <span id="current-condition-badge" class="condition-badge">条件B</span>
+      </div>
+
+      <fieldset class="condition-fieldset">
+        <legend class="sr-only">使用する実験条件</legend>
+        <label class="condition-card">
+          <input type="radio" name="experiment-condition" value="A">
+          <span class="condition-card__body">
+            <strong>条件A：称賛のみ</strong>
+            <span>「やめる」→「流石です！」→終了</span>
+          </span>
+        </label>
+
+        <label class="condition-card">
+          <input type="radio" name="experiment-condition" value="B">
+          <span class="condition-card__body">
+            <strong>条件B：称賛＋学習導線</strong>
+            <span>「流石です！」の後に課題ページへの小さな導線を表示</span>
+          </span>
+        </label>
+      </fieldset>
+      <p id="condition-status" class="status" role="status" aria-live="polite"></p>
+    </section>
 
     <section class="panel" aria-labelledby="settings-heading">
       <div class="panel-heading">
         <div>
-          <p class="section-number">01</p>
+          <p class="section-number">02</p>
           <h2 id="settings-heading">課題ページの設定</h2>
         </div>
       </div>
 
       <form id="settings-form" novalidate>
-        <label for="task-url">「課題ページを開く」で移動するURL</label>
+        <label for="task-url">条件Bの「課題ページを開く」で移動するURL</label>
         <div class="input-row">
           <input
             id="task-url"
@@ -35,7 +65,7 @@
           >
           <button class="button button--primary" type="submit">保存する</button>
         </div>
-        <p class="helper">http:// または https:// から始まるURLを1つ登録できます。</p>
+        <p class="helper">条件Aでは使用しません。http:// または https:// から始まるURLを1つ登録できます。</p>
         <p id="settings-status" class="status" role="status" aria-live="polite"></p>
       </form>
     </section>
@@ -43,13 +73,16 @@
     <section class="panel" aria-labelledby="results-heading">
       <div class="panel-heading panel-heading--split">
         <div>
-          <p class="section-number">02</p>
+          <p class="section-number">03</p>
           <h2 id="results-heading">成果の記録</h2>
         </div>
         <button id="delete-logs" class="button button--danger" type="button">記録を削除</button>
       </div>
 
       <div id="summary" class="summary-grid" aria-live="polite"></div>
+
+      <h3>条件別比較</h3>
+      <div id="condition-results" class="condition-results-grid"></div>
 
       <h3>サイト別</h3>
       <div id="site-results" class="site-grid"></div>
@@ -61,15 +94,15 @@
     <section class="panel panel--subtle" aria-labelledby="behavior-heading">
       <div class="panel-heading">
         <div>
-          <p class="section-number">03</p>
+          <p class="section-number">04</p>
           <h2 id="behavior-heading">現在の動作</h2>
         </div>
       </div>
+      <p id="current-behavior" class="current-behavior"></p>
       <ul class="behavior-list">
         <li>YouTube・X・Instagramを新しいタブで開いたときに介入します。</li>
-        <li>「開くのをやめる」を選ぶと、成功だけを表示してSNSタブを閉じます。</li>
-        <li>成功後、次に表示した通常ページの右上で1回だけ「課題ページを開く」を任意に提示します。</li>
-        <li>課題ページを開かなかったことを、失敗として画面には表示しません。</li>
+        <li>各記録には、その時点で使用していた条件A／Bを保存します。</li>
+        <li>条件の切り替え後に開いたSNSから、新しい条件が適用されます。</li>
         <li>選択結果と課題URLは、このChromeの <code>chrome.storage.local</code> に保存します。</li>
       </ul>
     </section>

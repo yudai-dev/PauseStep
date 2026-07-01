@@ -3,14 +3,16 @@
 (() => {
   const OVERLAY_ID = 'study-start-overlay';
   const WAIT_SECONDS = 10;
+  const CONDITION_A_SUCCESS_MS = 2200;
   const SUCCESS_PROMPT_DELAY_MS = 550;
   const SUCCESS_AUTO_CLOSE_MS = 6500;
   const STAGE_TRANSITION_MS = 220;
   let pageLocked = false;
   let waitingTimer = null;
+  let experimentCondition = 'B';
 
   initialize().catch((error) => {
-    console.error('[学習着手支援] 初期化に失敗しました。', error);
+    console.error('[PauseStep] 初期化に失敗しました。', error);
     unlockPage();
   });
 
@@ -26,6 +28,8 @@
       unlockPage();
       return;
     }
+
+    experimentCondition = response.condition === 'A' ? 'A' : 'B';
 
     const site = detectSite(location.hostname);
     if (!site) {
@@ -92,12 +96,8 @@
       <main class="study-start-card study-start-card--choice" role="dialog" aria-modal="true" aria-labelledby="study-start-title">
         <h1 id="study-start-title" class="study-start-title">${escapeHtml(site.label)}を開きますか？</h1>
         <div class="study-start-actions">
-          <button id="study-start-open-site" class="study-start-button study-start-button--secondary" type="button">
-            開く
-          </button>
-          <button id="study-start-dismiss-site" class="study-start-button study-start-button--primary" type="button">
-            やめる
-          </button>
+          <button id="study-start-open-site" class="study-start-button study-start-button--secondary" type="button">開く</button>
+          <button id="study-start-dismiss-site" class="study-start-button study-start-button--primary" type="button">やめる</button>
         </div>
         <p id="study-start-status" class="study-start-status" role="status" aria-live="polite"></p>
       </main>
@@ -128,6 +128,26 @@
   }
 
   function showSuccessStage(logId) {
+    if (experimentCondition === 'A') {
+      showConditionASuccess();
+      return;
+    }
+
+    showConditionBSuccess(logId);
+  }
+
+  function showConditionASuccess() {
+    renderStage(`
+      <main class="study-start-card study-start-card--success" role="status" aria-live="polite">
+        <div class="study-start-success-mark" aria-hidden="true">✓</div>
+        <h1 class="study-start-title">流石です！</h1>
+      </main>
+    `);
+
+    window.setTimeout(exitDismissedSite, CONDITION_A_SUCCESS_MS);
+  }
+
+  function showConditionBSuccess(logId) {
     renderStage(`
       <main class="study-start-card study-start-card--success" role="status" aria-live="polite">
         <div class="study-start-success-mark" aria-hidden="true">✓</div>
@@ -141,9 +161,7 @@
       </aside>
     `);
 
-    const autoCloseTimer = window.setTimeout(() => {
-      exitDismissedSite();
-    }, SUCCESS_AUTO_CLOSE_MS);
+    const autoCloseTimer = window.setTimeout(exitDismissedSite, SUCCESS_AUTO_CLOSE_MS);
 
     window.setTimeout(async () => {
       const prompt = document.getElementById('study-start-inline-prompt');
@@ -163,7 +181,7 @@
           throw new Error(response?.error ?? '表示記録を保存できませんでした。');
         }
       } catch (error) {
-        console.error('[学習着手支援] 学習導線の表示記録に失敗しました。', error);
+        console.error('[PauseStep] 学習導線の表示記録に失敗しました。', error);
       }
     }, SUCCESS_PROMPT_DELAY_MS);
 
@@ -205,7 +223,7 @@
 
   function exitDismissedSite() {
     chrome.runtime.sendMessage({ type: 'EXIT_DISMISSED_SITE' }).catch((error) => {
-      console.error('[学習着手支援] タブ終了要求の送信に失敗しました。', error);
+      console.error('[PauseStep] タブ終了要求の送信に失敗しました。', error);
     });
   }
 
@@ -258,6 +276,7 @@
       id,
       timestamp: new Date().toISOString(),
       site,
+      condition: experimentCondition,
       firstChoice,
       studyPromptShown: false,
       studyPromptShownAt: null,

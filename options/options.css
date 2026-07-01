@@ -262,3 +262,130 @@ code {
     grid-template-columns: 1fr;
   }
 }
+
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.condition-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 6px 12px;
+  color: #315f91;
+  background: #edf4fb;
+  border: 1px solid #cddfed;
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.condition-fieldset {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.condition-card {
+  position: relative;
+  display: block;
+  margin: 0;
+  cursor: pointer;
+}
+
+.condition-card input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.condition-card__body {
+  display: grid;
+  gap: 8px;
+  min-height: 116px;
+  padding: 20px;
+  background: #f7f9fb;
+  border: 2px solid #dfe7ee;
+  border-radius: 16px;
+  transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+}
+
+.condition-card__body strong {
+  color: #1a2635;
+  font-size: 17px;
+}
+
+.condition-card__body span {
+  color: #647388;
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.condition-card input:checked + .condition-card__body {
+  background: #eef5fb;
+  border-color: #4f7fab;
+  box-shadow: 0 0 0 3px rgba(79, 127, 171, 0.13);
+}
+
+.condition-card input:focus-visible + .condition-card__body {
+  outline: 3px solid rgba(82, 127, 171, 0.22);
+  outline-offset: 3px;
+}
+
+.condition-results-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.condition-result-card {
+  padding: 22px;
+  background: #f7f9fb;
+  border: 1px solid #dfe7ee;
+  border-radius: 16px;
+}
+
+.condition-result-card h4 {
+  margin: 0 0 6px;
+  font-size: 18px;
+}
+
+.condition-result-description {
+  margin: 0 0 16px;
+  color: #6a788b;
+  font-size: 13px;
+}
+
+.current-behavior {
+  margin: 0 0 14px;
+  padding: 14px 16px;
+  color: #29435f;
+  background: #edf4fa;
+  border: 1px solid #d2e1ed;
+  border-radius: 12px;
+  font-weight: 750;
+  line-height: 1.7;
+}
+
+@media (max-width: 850px) {
+  .condition-fieldset,
+  .condition-results-grid {
+    grid-template-columns: 1fr;
+  }
+}

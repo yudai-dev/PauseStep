@@ -3,7 +3,11 @@
 const TAB_STATE_PREFIX = 'intervenedTab:';
 
 chrome.runtime.onInstalled.addListener(async () => {
-  const { taskUrl, logs } = await chrome.storage.local.get(['taskUrl', 'logs']);
+  const {
+    taskUrl,
+    logs,
+    experimentCondition
+  } = await chrome.storage.local.get(['taskUrl', 'logs', 'experimentCondition']);
   const defaults = {};
 
   if (typeof taskUrl !== 'string') {
@@ -12,6 +16,10 @@ chrome.runtime.onInstalled.addListener(async () => {
 
   if (!Array.isArray(logs)) {
     defaults.logs = [];
+  }
+
+  if (experimentCondition !== 'A' && experimentCondition !== 'B') {
+    defaults.experimentCondition = 'B';
   }
 
   if (Object.keys(defaults).length > 0) {
@@ -62,13 +70,15 @@ async function handleShouldIntervene(sender) {
 
   const key = `${TAB_STATE_PREFIX}${tabId}`;
   const state = await chrome.storage.session.get(key);
+  const { experimentCondition = 'B' } = await chrome.storage.local.get('experimentCondition');
+  const condition = experimentCondition === 'A' ? 'A' : 'B';
 
   if (state[key] === true) {
-    return { ok: true, shouldIntervene: false };
+    return { ok: true, shouldIntervene: false, condition };
   }
 
   await chrome.storage.session.set({ [key]: true });
-  return { ok: true, shouldIntervene: true };
+  return { ok: true, shouldIntervene: true, condition };
 }
 
 async function handleMarkStudyPromptShown(message) {
@@ -82,7 +92,6 @@ async function handleMarkStudyPromptShown(message) {
 }
 
 async function handleOpenTaskFromSuccess(message, sender) {
-
   const tabId = sender.tab?.id;
   const { taskUrl = '' } = await chrome.storage.local.get('taskUrl');
   const normalizedUrl = normalizeHttpUrl(taskUrl);
@@ -125,19 +134,16 @@ async function handleExitDismissedSite(sender) {
 
   const tabsInWindow = await chrome.tabs.query({ windowId: currentTab.windowId });
   const fallbackTab = tabsInWindow.find((tab) => Number.isInteger(tab.id) && tab.id !== currentTab.id);
-  let fallbackTabId = null;
 
   if (fallbackTab?.id) {
-    fallbackTabId = fallbackTab.id;
     await chrome.tabs.update(fallbackTab.id, { active: true });
   } else {
-    const createdTab = await chrome.tabs.create({
+    await chrome.tabs.create({
       url: 'about:blank',
       active: true,
       windowId: currentTab.windowId,
       index: Math.max(0, currentTab.index)
     });
-    fallbackTabId = createdTab.id ?? null;
   }
 
   await chrome.tabs.remove(currentTab.id);

@@ -6,10 +6,19 @@ const SITE_LABELS = {
   instagram: 'Instagram'
 };
 
+const CONDITION_LABELS = {
+  A: '条件A：称賛のみ',
+  B: '条件B：称賛＋学習導線'
+};
+
 const settingsForm = document.getElementById('settings-form');
 const taskUrlInput = document.getElementById('task-url');
 const settingsStatus = document.getElementById('settings-status');
+const conditionStatus = document.getElementById('condition-status');
+const conditionBadge = document.getElementById('current-condition-badge');
+const currentBehavior = document.getElementById('current-behavior');
 const summary = document.getElementById('summary');
+const conditionResults = document.getElementById('condition-results');
 const siteResults = document.getElementById('site-results');
 const resultsEmpty = document.getElementById('results-empty');
 const resultsStatus = document.getElementById('results-status');
@@ -17,6 +26,22 @@ const deleteLogsButton = document.getElementById('delete-logs');
 
 initialize().catch((error) => {
   setStatus(resultsStatus, `読み込みに失敗しました: ${error.message}`, 'error');
+});
+
+document.querySelectorAll('input[name="experiment-condition"]').forEach((radio) => {
+  radio.addEventListener('change', async () => {
+    if (!radio.checked) {
+      return;
+    }
+
+    const condition = normalizeCondition(radio.value);
+    await chrome.storage.local.set({
+      experimentCondition: condition,
+      conditionChangedAt: new Date().toISOString()
+    });
+    renderCurrentCondition(condition);
+    setStatus(conditionStatus, `${CONDITION_LABELS[condition]}に切り替えました。次に開くSNSから適用されます。`, 'success');
+  });
 });
 
 settingsForm.addEventListener('submit', async (event) => {
@@ -49,15 +74,44 @@ deleteLogsButton.addEventListener('click', async () => {
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName === 'local' && changes.logs) {
+  if (areaName !== 'local') {
+    return;
+  }
+
+  if (changes.logs) {
     renderResults(Array.isArray(changes.logs.newValue) ? changes.logs.newValue : []);
+  }
+
+  if (changes.experimentCondition) {
+    renderCurrentCondition(normalizeCondition(changes.experimentCondition.newValue));
   }
 });
 
 async function initialize() {
-  const { taskUrl = '', logs = [] } = await chrome.storage.local.get(['taskUrl', 'logs']);
+  const {
+    taskUrl = '',
+    logs = [],
+    experimentCondition = 'B'
+  } = await chrome.storage.local.get(['taskUrl', 'logs', 'experimentCondition']);
+
+  const condition = normalizeCondition(experimentCondition);
   taskUrlInput.value = typeof taskUrl === 'string' ? taskUrl : '';
+  document.querySelector(`input[name="experiment-condition"][value="${condition}"]`).checked = true;
+  renderCurrentCondition(condition);
   renderResults(Array.isArray(logs) ? logs : []);
+}
+
+function renderCurrentCondition(condition) {
+  const normalized = normalizeCondition(condition);
+  conditionBadge.textContent = normalized === 'A' ? '条件A' : '条件B';
+  currentBehavior.textContent = normalized === 'A'
+    ? '現在は条件Aです。「やめる」を選ぶと「流石です！」だけを表示して終了します。'
+    : '現在は条件Bです。「流石です！」の後に、課題ページへの小さな導線を表示します。';
+
+  const radio = document.querySelector(`input[name="experiment-condition"][value="${normalized}"]`);
+  if (radio) {
+    radio.checked = true;
+  }
 }
 
 function renderResults(logs) {
@@ -65,11 +119,15 @@ function renderResults(logs) {
   const overall = calculateStats(validLogs);
 
   summary.innerHTML = [
-    metricCard('介入後に選択した', overall.total, '最初の選択が完了した回数'),
+    metricCard('介入後に選択した', overall.total, '条件A・Bの合計'),
     metricCard('SNSを開かずにやめた', overall.dismissCount, formatPercent(overall.dismissRate)),
-    metricCard('学習導線を表示した', overall.promptCount, '成功後、通常ページの右上に表示'),
-    metricCard('課題ページを開いた', overall.taskCount, '追加でできた小さな一歩')
+    metricCard('学習導線を表示した', overall.promptCount, '条件Bで表示された回数'),
+    metricCard('課題ページを開いた', overall.taskCount, '条件Bで発生した学習着手')
   ].join('');
+
+  conditionResults.innerHTML = ['A', 'B']
+    .map((condition) => conditionCard(condition, calculateStats(validLogs.filter((log) => log.condition === condition))))
+    .join('');
 
   siteResults.innerHTML = Object.entries(SITE_LABELS)
     .map(([siteId, label]) => {
@@ -96,7 +154,8 @@ function calculateStats(logs) {
     promptCount,
     taskCount,
     openRate: safeDivide(openCount, total),
-    dismissRate: safeDivide(dismissCount, total)
+    dismissRate: safeDivide(dismissCount, total),
+    taskRate: safeDivide(taskCount, dismissCount)
   };
 }
 
@@ -106,6 +165,21 @@ function metricCard(label, value, detail) {
       <p class="metric-label">${escapeHtml(label)}</p>
       <p class="metric-value">${value}回</p>
       <p class="metric-detail">${escapeHtml(detail)}</p>
+    </article>
+  `;
+}
+
+function conditionCard(condition, stats) {
+  const isA = condition === 'A';
+  return `
+    <article class="condition-result-card">
+      <h4>${escapeHtml(CONDITION_LABELS[condition])}</h4>
+      <p class="condition-result-description">${isA ? '成功後に学習導線を出さない' : '成功後に課題ページへの導線を出す'}</p>
+      <dl class="site-stats">
+        ${siteStat('選択合計', `${stats.total}回`)}
+        ${siteStat('SNS停止率', `${formatPercent(stats.dismissRate)}（${stats.dismissCount}回）`)}
+        ${isA ? '' : siteStat('課題ページを開いた', `${stats.taskCount}回（着手率 ${formatPercent(stats.taskRate)}）`)}
+      </dl>
     </article>
   `;
 }
@@ -145,9 +219,14 @@ function isValidLog(log) {
 function normalizeLegacyLog(log) {
   return {
     ...log,
+    condition: normalizeCondition(log.condition),
     studyPromptShown: log.studyPromptShown === true,
     openedTask: log.openedTask === true || log.startedTask === true
   };
+}
+
+function normalizeCondition(value) {
+  return value === 'A' ? 'A' : 'B';
 }
 
 function normalizeHttpUrl(value) {

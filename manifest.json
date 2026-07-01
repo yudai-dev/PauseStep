@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "学習着手支援",
-  "version": "0.3.3",
-  "description": "SNSを開く前に静かな10秒介入を表示し、やめた直後の成功画面で学習着手を任意に提案します。",
+  "name": "PauseStep",
+  "version": "0.4.0",
+  "description": "SNSを開く前にひと呼吸を促し、称賛のみの条件Aと学習導線付きの条件Bを切り替えて比較できます。",
   "permissions": [
     "storage",
     "tabs"
@@ -16,7 +16,7 @@
     "service_worker": "service-worker.js"
   },
   "action": {
-    "default_title": "学習着手支援の設定を開く"
+    "default_title": "PauseStepの設定と結果を開く"
   },
   "options_page": "options/options.html",
   "content_scripts": [
